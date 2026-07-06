@@ -2,6 +2,8 @@
 
 A cross-platform desktop client for [Bluecherry DVR](https://www.bluecherrydvr.com/) servers, written in Python and PyQt6.
 
+> Server source: [github.com/bluecherrydvr](https://github.com/bluecherrydvr)
+
 ## Features
 
 - **Live view** — MJPEG streaming or JPEG polling (auto-selected based on network)
