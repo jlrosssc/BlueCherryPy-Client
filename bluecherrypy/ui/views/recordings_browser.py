@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QListWidget, QListWidgetItem, QLabel, QPushButton,
     QComboBox, QDateEdit, QProgressBar, QSizePolicy, QFrame,
-    QFileDialog, QMenu
+    QFileDialog, QMenu, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QDate, QSize, QPoint
 from PyQt6.QtGui import QPixmap, QImage, QAction
@@ -216,6 +216,9 @@ class RecordingsBrowserWidget(QWidget):
         self._pending_device_ids: list[int]              = []
         self._current_recording: Optional[RecordingEvent] = None
         self._cached_paths: dict[int, str]               = {}  # media_id → temp path
+        self._batch_queue:  list                         = []
+        self._batch_total:  int                          = 0
+        self._batch_dir:    str                          = ""
 
         self._build_ui()
 
@@ -327,7 +330,9 @@ class RecordingsBrowserWidget(QWidget):
             "QListWidget::item:selected{background:#2c5282; color:#ffffff;}"
             "QListWidget::item:hover:!selected{background:#2a2a3a; color:#ddd;}"
         )
-        self._list.currentItemChanged.connect(self._on_selection_changed)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.currentItemChanged.connect(self._on_current_item_changed)
+        self._list.itemSelectionChanged.connect(self._on_selection_changed)
         self._list.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._list, stretch=1)
         return panel
@@ -536,30 +541,50 @@ class RecordingsBrowserWidget(QWidget):
 
     # ── Selection ─────────────────────────────────────────────────────────────
 
-    def _on_selection_changed(self, current: QListWidgetItem, _):
+    def _on_current_item_changed(self, current: QListWidgetItem, _):
+        """Tracks the focused item and updates the info label."""
         if current is None:
             self._current_recording = None
-            self._play_sel_btn.setEnabled(False)
-            self._save_sel_btn.setEnabled(False)
             self._sel_info_lbl.setText("Select a recording")
             return
-
         r: RecordingEvent = current.data(Qt.ItemDataRole.UserRole)
         if r is None:
             return
         self._current_recording = r
-
         cam      = self._device_map.get(r.device_id or 0, "Camera")
         date_str = r.date.strftime("%Y-%m-%d %H:%M") if r.date else ""
         dur_str  = f"  ·  {r.duration_description}" if r.duration_description else ""
         self._sel_info_lbl.setText(f"{cam}  ·  {date_str}{dur_str}")
 
-        has_media = r.media_id is not None
-        self._play_sel_btn.setEnabled(has_media)
-        self._save_sel_btn.setEnabled(has_media)
+    def _on_selection_changed(self):
+        """Updates buttons and auto-plays when selection changes."""
+        selected = self._list.selectedItems()
+        n = len(selected)
+        downloadable = [
+            item.data(Qt.ItemDataRole.UserRole) for item in selected
+            if item.data(Qt.ItemDataRole.UserRole) is not None
+            and item.data(Qt.ItemDataRole.UserRole).media_id is not None
+        ]
+        n_dl   = len(downloadable)
+        single = (n == 1 and self._current_recording is not None
+                  and self._current_recording.media_id is not None)
 
-        if not has_media:
-            self._player.show_placeholder("No media file for this recording.")
+        self._play_sel_btn.setEnabled(single)
+        self._save_sel_btn.setEnabled(n_dl > 0)
+        self._save_sel_btn.setText(
+            f"💾  Download ({n_dl})" if n_dl > 1 else "💾  Download"
+        )
+        if n > 1:
+            self._sel_info_lbl.setText(f"{n} recordings selected")
+        elif n == 0:
+            self._sel_info_lbl.setText("Select a recording")
+
+        if n == 1 and self._current_recording is not None:
+            if self._current_recording.media_id is None:
+                self._player.show_placeholder("No media file for this recording.")
+            elif self._player.has_loaded_media:
+                # Auto-switch when player already has something loaded
+                self._play_recording(self._current_recording)
 
     # ── Context menu ──────────────────────────────────────────────────────────
 
@@ -571,17 +596,30 @@ class RecordingsBrowserWidget(QWidget):
         if r is None:
             return
 
+        selected = self._list.selectedItems()
+        multi    = len(selected) > 1 and item in selected
+        dl_targets = [
+            i.data(Qt.ItemDataRole.UserRole) for i in (selected if multi else [item])
+            if i.data(Qt.ItemDataRole.UserRole) is not None
+            and i.data(Qt.ItemDataRole.UserRole).media_id is not None
+        ]
+
         menu = QMenu(self)
         play_act     = menu.addAction("▶  Play")
-        download_act = menu.addAction("💾  Download to disk…")
-        play_act.setEnabled(r.media_id is not None)
-        download_act.setEnabled(r.media_id is not None)
+        dl_label     = (f"💾  Download {len(dl_targets)} recordings…"
+                        if multi else "💾  Download to disk…")
+        download_act = menu.addAction(dl_label)
+        play_act.setEnabled(r.media_id is not None and not multi)
+        download_act.setEnabled(len(dl_targets) > 0)
 
         chosen = menu.exec(self._list.mapToGlobal(pos))
         if chosen == play_act:
             self._play_recording(r)
         elif chosen == download_act:
-            self._save_recording(r)
+            if len(dl_targets) > 1:
+                self._start_batch_save(dl_targets)
+            elif dl_targets:
+                self._save_recording(dl_targets[0])
 
     # ── Playback ──────────────────────────────────────────────────────────────
 
@@ -624,8 +662,18 @@ class RecordingsBrowserWidget(QWidget):
     # ── Save to disk ──────────────────────────────────────────────────────────
 
     def _save_selected(self):
-        if self._current_recording:
-            self._save_recording(self._current_recording)
+        selected = self._list.selectedItems()
+        recordings = [
+            item.data(Qt.ItemDataRole.UserRole) for item in selected
+            if item.data(Qt.ItemDataRole.UserRole) is not None
+            and item.data(Qt.ItemDataRole.UserRole).media_id is not None
+        ]
+        if not recordings:
+            return
+        if len(recordings) == 1:
+            self._save_recording(recordings[0])
+        else:
+            self._start_batch_save(recordings)
 
     def _save_recording(self, r: RecordingEvent):
         cam      = self._device_map.get(r.device_id or 0, "Camera")
@@ -675,6 +723,65 @@ class RecordingsBrowserWidget(QWidget):
         if self._current_recording:
             self._save_sel_btn.setEnabled(True)
         self._set_status(f"⚠ Save failed: {msg}")
+
+    # ── Batch download ────────────────────────────────────────────────────────
+
+    def _start_batch_save(self, recordings: list):
+        dest_dir = QFileDialog.getExistingDirectory(
+            self, f"Save {len(recordings)} Recordings To Folder",
+            os.path.expanduser("~")
+        )
+        if not dest_dir:
+            return
+        self._batch_queue = list(recordings)
+        self._batch_total = len(recordings)
+        self._batch_dir   = dest_dir
+        self._process_batch()
+
+    def _process_batch(self):
+        if not self._batch_queue:
+            self._dl_bar.hide()
+            n = self._batch_total
+            self._save_sel_btn.setEnabled(True)
+            self._set_status(f"✓ Saved {n} recording{'s' if n != 1 else ''}")
+            self._batch_total = 0
+            return
+
+        r    = self._batch_queue.pop(0)
+        done = self._batch_total - len(self._batch_queue)
+        cam  = self._device_map.get(r.device_id or 0, "Camera")
+        ts   = r.date.strftime("%Y%m%d_%H%M%S") if r.date else "recording"
+        dest = os.path.join(
+            self._batch_dir,
+            f"{cam}_{ts}.mp4".replace("/", "-").replace(":", "-")
+        )
+
+        self._dl_lbl.setText(f"Saving {done}/{self._batch_total}…")
+        self._dl_bar.show()
+        self._save_sel_btn.setEnabled(False)
+
+        if r.media_id is not None and r.media_id in self._cached_paths:
+            src = self._cached_paths[r.media_id]
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, dest)
+                except Exception as e:
+                    self._set_status(f"⚠ {e}")
+                QTimer.singleShot(0, self._process_batch)
+                return
+
+        if self._save_thread and self._save_thread.isRunning():
+            self._save_thread.terminate()
+            self._save_thread.wait()
+
+        self._save_thread = _SaveThread(self._client, r, dest)
+        self._save_thread.save_complete.connect(lambda _: self._process_batch())
+        self._save_thread.save_error.connect(self._on_batch_save_error)
+        self._save_thread.start()
+
+    def _on_batch_save_error(self, msg: str):
+        self._set_status(f"⚠ {msg} (skipping…)")
+        QTimer.singleShot(0, self._process_batch)
 
     def _on_download_error(self, msg: str):
         self._dl_bar.hide()

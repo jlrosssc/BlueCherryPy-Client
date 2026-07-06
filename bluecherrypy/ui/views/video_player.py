@@ -128,6 +128,10 @@ class VideoPlayerWidget(QWidget):
         self._player.mediaStatusChanged.connect(self._on_media_status)
         self._player.errorOccurred.connect(self._on_error)
 
+    @property
+    def has_loaded_media(self) -> bool:
+        return self._current_path is not None
+
     def play_file(self, path: str, label: str = ""):
         self._current_path = path
         self._status_lbl.setText(label)
