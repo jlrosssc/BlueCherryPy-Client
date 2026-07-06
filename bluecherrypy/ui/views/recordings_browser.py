@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from typing import Optional
@@ -8,10 +9,11 @@ import requests
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QListWidget, QListWidgetItem, QLabel, QPushButton,
-    QComboBox, QDateEdit, QProgressBar, QSizePolicy, QFrame
+    QComboBox, QDateEdit, QProgressBar, QSizePolicy, QFrame,
+    QFileDialog, QMenu
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QDate, QSize
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate, QSize, QPoint
+from PyQt6.QtGui import QPixmap, QImage, QAction
 
 from bluecherrypy.models.server import Server
 from bluecherrypy.models.device import Device
@@ -21,49 +23,61 @@ from bluecherrypy.ui.views.video_player import VideoPlayerWidget
 
 _THUMB_W = 176
 _THUMB_H = 99
-_ITEM_H = 120
+_ITEM_H  = 120
 
 
 # ── Background workers ────────────────────────────────────────────────────────
 
 class _FetchRecordingsThread(QThread):
     finished = pyqtSignal(int, list)
-    error = pyqtSignal(int, str)
+    error    = pyqtSignal(int, str)
 
     def __init__(self, client: BluecherryClient, device_id: int):
         super().__init__()
-        self._client = client
+        self._client    = client
         self._device_id = device_id
 
     def run(self):
         try:
-            self.finished.emit(self._device_id, self._client.fetch_recordings(self._device_id))
+            self.finished.emit(self._device_id,
+                               self._client.fetch_recordings(self._device_id))
         except Exception as e:
             self.error.emit(self._device_id, str(e))
 
 
 class _ThumbnailThread(QThread):
+    """jobs: list of (media_id, [url, fallback_url, ...])"""
     loaded = pyqtSignal(int, bytes)
 
-    def __init__(self, server: Server, jobs: list[tuple[int, str]]):
+    def __init__(self, server: Server, jobs: list[tuple[int, list[str]]]):
         super().__init__()
-        self._server = server
-        self._jobs = jobs
-        self._running = True
+        self._server   = server
+        self._jobs     = jobs
+        self._running  = True
 
     def run(self):
         session = requests.Session()
         session.verify = False
         headers = {"Authorization": self._server.authorization_header}
-        for media_id, url in self._jobs:
+        for media_id, urls in self._jobs:
             if not self._running:
                 break
-            try:
-                r = session.get(url, headers=headers, timeout=8)
-                if r.ok and "image" in r.headers.get("Content-Type", "").lower():
-                    self.loaded.emit(media_id, r.content)
-            except Exception:
-                pass
+            for url in urls:
+                try:
+                    r = session.get(url, headers=headers, timeout=8)
+                    if not r.ok or not r.content:
+                        continue
+                    ct = r.headers.get("Content-Type", "").lower()
+                    is_image = (
+                        "image" in ct
+                        or ct in ("application/octet-stream", "")
+                        or r.content[:2] in (b'\xff\xd8', b'\x89P')
+                    )
+                    if is_image:
+                        self.loaded.emit(media_id, r.content)
+                        break  # got it, move to next recording
+                except Exception:
+                    continue
         session.close()
 
     def stop(self):
@@ -71,17 +85,40 @@ class _ThumbnailThread(QThread):
 
 
 class _DownloadThread(QThread):
+    """Download to a temp file for playback."""
     finished = pyqtSignal(str)
-    error = pyqtSignal(str)
+    error    = pyqtSignal(str)
 
     def __init__(self, client: BluecherryClient, recording: RecordingEvent):
         super().__init__()
-        self._client = client
+        self._client    = client
         self._recording = recording
 
     def run(self):
         try:
             self.finished.emit(self._client.download_recording(self._recording))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _SaveThread(QThread):
+    """Download a recording and save directly to a user-chosen path."""
+    progress = pyqtSignal(int)   # bytes written so far
+    finished = pyqtSignal(str)   # destination path
+    error    = pyqtSignal(str)
+
+    def __init__(self, client: BluecherryClient, recording: RecordingEvent,
+                 destination: str):
+        super().__init__()
+        self._client      = client
+        self._recording   = recording
+        self._destination = destination
+
+    def run(self):
+        try:
+            tmp = self._client.download_recording(self._recording)
+            shutil.copy2(tmp, self._destination)
+            self.finished.emit(self._destination)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -102,7 +139,9 @@ class _RecordingItemWidget(QWidget):
         self._thumb = QLabel()
         self._thumb.setFixedSize(_THUMB_W, _THUMB_H)
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb.setStyleSheet("background:#222; border-radius:4px; color:#555; font-size:10px;")
+        self._thumb.setStyleSheet(
+            "background:#222; border-radius:4px; color:#555; font-size:10px;"
+        )
         self._thumb.setText("…")
 
         info = QWidget()
@@ -110,19 +149,28 @@ class _RecordingItemWidget(QWidget):
         info_layout.setContentsMargins(0, 4, 0, 4)
         info_layout.setSpacing(3)
 
-        date_lbl = QLabel(self.recording.date.strftime("%Y-%m-%d") if self.recording.date else "Unknown")
+        date_lbl = QLabel(
+            self.recording.date.strftime("%Y-%m-%d") if self.recording.date else "Unknown"
+        )
         date_lbl.setStyleSheet("font-weight:bold; font-size:12px;")
 
-        time_lbl = QLabel(self.recording.date.strftime("%H:%M:%S") if self.recording.date else "")
+        time_lbl = QLabel(
+            self.recording.date.strftime("%H:%M:%S") if self.recording.date else ""
+        )
         time_lbl.setStyleSheet("color:#aaa; font-size:11px;")
 
-        cam_lbl = QLabel(device_name)
+        cam_lbl  = QLabel(device_name)
         cam_lbl.setStyleSheet("color:#888; font-size:11px;")
 
-        dur_lbl = QLabel(f"Duration: {self.recording.duration_description}" if self.recording.duration_description else "")
+        dur_lbl  = QLabel(
+            f"Duration: {self.recording.duration_description}"
+            if self.recording.duration_description else ""
+        )
         dur_lbl.setStyleSheet("color:#5a9; font-size:11px;")
 
-        type_lbl = QLabel(self.recording.type_id.capitalize() if self.recording.type_id else "")
+        type_lbl = QLabel(
+            self.recording.type_id.capitalize() if self.recording.type_id else ""
+        )
         type_lbl.setStyleSheet("color:#a88; font-size:10px;")
 
         for w in (date_lbl, time_lbl, cam_lbl, dur_lbl, type_lbl):
@@ -155,22 +203,26 @@ class RecordingsBrowserWidget(QWidget):
     def __init__(self, server: Server, devices: list[Device],
                  initial_device: Optional[Device] = None, parent=None):
         super().__init__(parent)
-        self._server = server
-        self._devices = devices
-        self._client = BluecherryClient(server)
-        self._all_recordings: list[RecordingEvent] = []
-        self._device_map: dict[int, str] = {d.id: d.name for d in devices}
+        self._server   = server
+        self._devices  = devices
+        self._client   = BluecherryClient(server)
+        self._all_recordings: list[RecordingEvent]       = []
+        self._device_map: dict[int, str]                 = {d.id: d.name for d in devices}
         self._fetch_thread: Optional[_FetchRecordingsThread] = None
-        self._thumb_thread: Optional[_ThumbnailThread] = None
-        self._dl_thread: Optional[_DownloadThread] = None
+        self._thumb_thread: Optional[_ThumbnailThread]   = None
+        self._dl_thread:    Optional[_DownloadThread]    = None
+        self._save_thread:  Optional[_SaveThread]        = None
         self._item_widgets: dict[int, _RecordingItemWidget] = {}
-        self._pending_device_ids: list[int] = []
+        self._pending_device_ids: list[int]              = []
+        self._current_recording: Optional[RecordingEvent] = None
+        self._cached_paths: dict[int, str]               = {}  # media_id → temp path
 
         self._build_ui()
 
-        # Pre-select camera
         if initial_device:
-            idx = next((i + 1 for i, d in enumerate(devices) if d.id == initial_device.id), 0)
+            idx = next(
+                (i + 1 for i, d in enumerate(devices) if d.id == initial_device.id), 0
+            )
             self._camera_combo.setCurrentIndex(idx)
         self._load_recordings()
 
@@ -193,8 +245,8 @@ class RecordingsBrowserWidget(QWidget):
 
         self._status_lbl = QLabel()
         self._status_lbl.setStyleSheet(
-            "background:#1c1c1e; color:#888; font-size:11px; padding:3px 10px; "
-            "border-top:1px solid #333;"
+            "background:#1c1c1e; color:#888; font-size:11px; "
+            "padding:3px 10px; border-top:1px solid #333;"
         )
         root.addWidget(self._status_lbl)
 
@@ -232,7 +284,6 @@ class RecordingsBrowserWidget(QWidget):
         layout.addWidget(self._to_date)
 
         layout.addWidget(_sep())
-        # Hour-based quick filters use negative values as a signal (hours, not days)
         for label, val in [("1h", -1), ("4h", -4), ("8h", -8),
                            ("Today", 0), ("7 Days", 7), ("30 Days", 30)]:
             btn = QPushButton(label)
@@ -270,12 +321,14 @@ class RecordingsBrowserWidget(QWidget):
 
         self._list = QListWidget()
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.setStyleSheet(
             "QListWidget{border:none; background:#1c1c1e; color:#ddd;}"
             "QListWidget::item:selected{background:#2c5282; color:#ffffff;}"
             "QListWidget::item:hover:!selected{background:#2a2a3a; color:#ddd;}"
         )
         self._list.currentItemChanged.connect(self._on_selection_changed)
+        self._list.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._list, stretch=1)
         return panel
 
@@ -285,17 +338,47 @@ class RecordingsBrowserWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Action bar above the player
+        action_bar = QWidget()
+        action_bar.setStyleSheet(
+            "background:#2c2c2e; border-bottom:1px solid #444;"
+        )
+        ab_layout = QHBoxLayout(action_bar)
+        ab_layout.setContentsMargins(10, 6, 10, 6)
+        ab_layout.setSpacing(8)
+
+        self._play_sel_btn = QPushButton("▶  Play")
+        self._play_sel_btn.setToolTip("Download and play selected recording")
+        self._play_sel_btn.setEnabled(False)
+        self._play_sel_btn.clicked.connect(self._play_selected)
+        ab_layout.addWidget(self._play_sel_btn)
+
+        self._save_sel_btn = QPushButton("💾  Download")
+        self._save_sel_btn.setToolTip("Save selected recording to disk")
+        self._save_sel_btn.setEnabled(False)
+        self._save_sel_btn.clicked.connect(self._save_selected)
+        ab_layout.addWidget(self._save_sel_btn)
+
+        self._sel_info_lbl = QLabel("Select a recording")
+        self._sel_info_lbl.setStyleSheet("color:#888; font-size:11px;")
+        ab_layout.addWidget(self._sel_info_lbl, stretch=1)
+        layout.addWidget(action_bar)
+
+        # Video player
         self._player = VideoPlayerWidget()
         self._player.error_occurred.connect(
-            lambda msg: self._set_status(f"Player: {msg} — use ⤴ to open in system player")
+            lambda msg: self._set_status(
+                f"Player error: {msg} — use ⤴ button to open in system player"
+            )
         )
         layout.addWidget(self._player, stretch=1)
 
+        # Download progress bar (used by Save)
         self._dl_bar = QWidget()
         self._dl_bar.setStyleSheet("background:#1c1c1e; border-top:1px solid #333;")
         dl_layout = QHBoxLayout(self._dl_bar)
         dl_layout.setContentsMargins(10, 5, 10, 5)
-        self._dl_lbl = QLabel("Downloading…")
+        self._dl_lbl  = QLabel("Working…")
         self._dl_lbl.setStyleSheet("color:#aaa; font-size:11px;")
         self._dl_prog = QProgressBar()
         self._dl_prog.setRange(0, 0)
@@ -313,6 +396,7 @@ class RecordingsBrowserWidget(QWidget):
         self._stop_threads()
         self._all_recordings.clear()
         self._item_widgets.clear()
+        self._cached_paths.clear()
         self._list.clear()
         self._progress.show()
         self._count_lbl.setText("  Loading…")
@@ -338,7 +422,7 @@ class RecordingsBrowserWidget(QWidget):
         self._fetch_thread.error.connect(self._on_fetch_error)
         self._fetch_thread.start()
 
-    def _on_fetch_finished(self, device_id: int, recordings: list[RecordingEvent]):
+    def _on_fetch_finished(self, device_id: int, recordings: list):
         self._all_recordings.extend(recordings)
         if self._pending_device_ids:
             self._fetch_next_device()
@@ -363,17 +447,17 @@ class RecordingsBrowserWidget(QWidget):
 
     def _apply_filters(self):
         import time as _time
-        now_ts = _time.time()
+        now_ts    = _time.time()
         device_id = self._camera_combo.currentData()
 
         if getattr(self, "_hours_filter", 0) > 0:
             from_ts = now_ts - self._hours_filter * 3600
-            to_ts = now_ts
+            to_ts   = now_ts
         else:
-            from_d = self._from_date.date().toPyDate()
-            to_d = self._to_date.date().toPyDate()
+            from_d  = self._from_date.date().toPyDate()
+            to_d    = self._to_date.date().toPyDate()
             from_ts = datetime(from_d.year, from_d.month, from_d.day).timestamp()
-            to_ts = datetime(to_d.year, to_d.month, to_d.day, 23, 59, 59).timestamp()
+            to_ts   = datetime(to_d.year, to_d.month, to_d.day, 23, 59, 59).timestamp()
 
         visible = [
             r for r in self._all_recordings
@@ -397,9 +481,9 @@ class RecordingsBrowserWidget(QWidget):
         self._list.clear()
         self._item_widgets.clear()
         for r in recordings:
-            name = self._device_map.get(r.device_id or 0, "Camera")
+            name   = self._device_map.get(r.device_id or 0, "Camera")
             widget = _RecordingItemWidget(r, name)
-            item = QListWidgetItem()
+            item   = QListWidgetItem()
             item.setSizeHint(QSize(self._list.width() or 340, _ITEM_H))
             item.setData(Qt.ItemDataRole.UserRole, r)
             self._list.addItem(item)
@@ -415,7 +499,8 @@ class RecordingsBrowserWidget(QWidget):
 
     def _on_camera_changed(self, _):
         device_id = self._camera_combo.currentData()
-        if device_id is None or any(r.device_id == device_id for r in self._all_recordings):
+        if device_id is None or any(r.device_id == device_id
+                                    for r in self._all_recordings):
             self._apply_filters()
         else:
             self._load_recordings()
@@ -426,10 +511,16 @@ class RecordingsBrowserWidget(QWidget):
         if self._thumb_thread and self._thumb_thread.isRunning():
             self._thumb_thread.stop()
             self._thumb_thread.wait(500)
-        jobs = [
-            (r.media_id, self._server.media_screenshot_url(r.media_id))
-            for r in self._all_recordings if r.media_id is not None
-        ]
+        jobs = []
+        for r in self._all_recordings:
+            if r.media_id is None:
+                continue
+            # Try screenshot endpoint first, fall back to live JPEG snapshot
+            urls = [
+                self._server.media_screenshot_url(r.media_id),
+                self._server.jpeg_url(r.device_id) if r.device_id else None,
+            ]
+            jobs.append((r.media_id, [u for u in urls if u]))
         if not jobs:
             return
         self._thumb_thread = _ThumbnailThread(self._server, jobs)
@@ -441,33 +532,145 @@ class RecordingsBrowserWidget(QWidget):
         if w:
             w.set_thumbnail(data)
 
-    # ── Playback ──────────────────────────────────────────────────────────────
+    # ── Selection ─────────────────────────────────────────────────────────────
 
     def _on_selection_changed(self, current: QListWidgetItem, _):
         if current is None:
+            self._current_recording = None
+            self._play_sel_btn.setEnabled(False)
+            self._save_sel_btn.setEnabled(False)
+            self._sel_info_lbl.setText("Select a recording")
             return
-        r: RecordingEvent = current.data(Qt.ItemDataRole.UserRole)
-        if r is None or r.media_id is None:
-            self._player.show_placeholder("No media for this recording.")
-            return
-        self._download_and_play(r)
 
-    def _download_and_play(self, r: RecordingEvent):
+        r: RecordingEvent = current.data(Qt.ItemDataRole.UserRole)
+        if r is None:
+            return
+        self._current_recording = r
+
+        cam      = self._device_map.get(r.device_id or 0, "Camera")
+        date_str = r.date.strftime("%Y-%m-%d %H:%M") if r.date else ""
+        dur_str  = f"  ·  {r.duration_description}" if r.duration_description else ""
+        self._sel_info_lbl.setText(f"{cam}  ·  {date_str}{dur_str}")
+
+        has_media = r.media_id is not None
+        self._play_sel_btn.setEnabled(has_media)
+        self._save_sel_btn.setEnabled(has_media)
+
+        if not has_media:
+            self._player.show_placeholder("No media file for this recording.")
+
+    # ── Context menu ──────────────────────────────────────────────────────────
+
+    def _on_context_menu(self, pos: QPoint):
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        r: RecordingEvent = item.data(Qt.ItemDataRole.UserRole)
+        if r is None:
+            return
+
+        menu = QMenu(self)
+        play_act     = menu.addAction("▶  Play")
+        download_act = menu.addAction("💾  Download to disk…")
+        play_act.setEnabled(r.media_id is not None)
+        download_act.setEnabled(r.media_id is not None)
+
+        chosen = menu.exec(self._list.mapToGlobal(pos))
+        if chosen == play_act:
+            self._play_recording(r)
+        elif chosen == download_act:
+            self._save_recording(r)
+
+    # ── Playback ──────────────────────────────────────────────────────────────
+
+    def _play_selected(self):
+        if self._current_recording:
+            self._play_recording(self._current_recording)
+
+    def _play_recording(self, r: RecordingEvent):
+        if r.media_id is not None and r.media_id in self._cached_paths:
+            path = self._cached_paths[r.media_id]
+            if os.path.exists(path):
+                self._play_cached(path, r)
+                return
+
         if self._dl_thread and self._dl_thread.isRunning():
             self._dl_thread.terminate()
-        self._player.show_placeholder("Downloading…")
-        self._dl_lbl.setText(f"Downloading  {r.title}…")
+
+        self._player.show_placeholder("Downloading for playback…")
+        self._dl_lbl.setText(f"Fetching  {r.title}…")
         self._dl_bar.show()
         self._dl_thread = _DownloadThread(self._client, r)
-        self._dl_thread.finished.connect(lambda path: self._on_download_done(path, r))
+        self._dl_thread.finished.connect(lambda path: self._on_play_download_done(path, r))
         self._dl_thread.error.connect(self._on_download_error)
         self._dl_thread.start()
 
-    def _on_download_done(self, path: str, r: RecordingEvent):
-        self._dl_bar.hide()
-        cam = self._device_map.get(r.device_id or 0, "Camera")
+    def _play_cached(self, path: str, r: RecordingEvent):
+        cam      = self._device_map.get(r.device_id or 0, "Camera")
         date_str = r.date.strftime("%Y-%m-%d %H:%M") if r.date else ""
-        self._player.play_file(path, f"{cam}  ·  {date_str}  ·  {r.duration_description or ''}")
+        self._player.play_file(
+            path, f"{cam}  ·  {date_str}  ·  {r.duration_description or ''}"
+        )
+
+    def _on_play_download_done(self, path: str, r: RecordingEvent):
+        self._dl_bar.hide()
+        if r.media_id is not None:
+            self._cached_paths[r.media_id] = path
+        self._play_cached(path, r)
+
+    # ── Save to disk ──────────────────────────────────────────────────────────
+
+    def _save_selected(self):
+        if self._current_recording:
+            self._save_recording(self._current_recording)
+
+    def _save_recording(self, r: RecordingEvent):
+        cam      = self._device_map.get(r.device_id or 0, "Camera")
+        date_str = r.date.strftime("%Y%m%d_%H%M%S") if r.date else "recording"
+        default  = f"{cam}_{date_str}.mp4".replace("/", "-").replace(":", "-")
+
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save Recording", default,
+            "Video Files (*.mp4 *.mkv);;All Files (*)"
+        )
+        if not dest:
+            return
+
+        # If already cached, copy immediately
+        if r.media_id is not None and r.media_id in self._cached_paths:
+            src = self._cached_paths[r.media_id]
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, dest)
+                    self._set_status(f"Saved to {dest}")
+                except Exception as e:
+                    self._set_status(f"Save failed: {e}")
+                return
+
+        # Otherwise download directly to destination
+        if self._save_thread and self._save_thread.isRunning():
+            self._save_thread.terminate()
+
+        self._dl_lbl.setText(f"Saving  {r.title}…")
+        self._dl_bar.show()
+        self._save_sel_btn.setEnabled(False)
+
+        self._save_thread = _SaveThread(self._client, r, dest)
+        self._save_thread.finished.connect(self._on_save_done)
+        self._save_thread.error.connect(self._on_save_error)
+        self._save_thread.start()
+
+    def _on_save_done(self, dest: str):
+        self._dl_bar.hide()
+        if self._current_recording:
+            self._save_sel_btn.setEnabled(True)
+        self._set_status(f"✓ Saved to {dest}")
+
+    def _on_save_error(self, msg: str):
+        self._dl_bar.hide()
+        if self._current_recording:
+            self._save_sel_btn.setEnabled(True)
+        self._set_status(f"⚠ Save failed: {msg}")
 
     def _on_download_error(self, msg: str):
         self._dl_bar.hide()
@@ -480,7 +683,8 @@ class RecordingsBrowserWidget(QWidget):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def _stop_threads(self):
-        for t in (self._fetch_thread, self._thumb_thread, self._dl_thread):
+        for t in (self._fetch_thread, self._thumb_thread,
+                  self._dl_thread, self._save_thread):
             if t and t.isRunning():
                 t.terminate()
                 t.wait(300)

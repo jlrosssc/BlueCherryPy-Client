@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QRectF
-from PyQt6.QtGui import QPixmap, QImage, QAction, QWheelEvent, QTransform
+from PyQt6.QtGui import QPixmap, QImage, QAction
 
 from bluecherrypy.models.server import Server
 from bluecherrypy.models.device import Device
@@ -51,7 +51,6 @@ class _FrameView(QGraphicsView):
         self._scene.addItem(self._item)
         self.setScene(self._scene)
 
-        self.setRenderHint(self.renderHints().value)   # keep defaults
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
@@ -86,7 +85,7 @@ class _FrameView(QGraphicsView):
         t = self.transform()
         self._zoom_level = t.m11()
 
-    def wheelEvent(self, event: QWheelEvent):
+    def wheelEvent(self, event):
         delta = event.angleDelta().y()
         factor = 1.15 if delta > 0 else 1 / 1.15
         new_zoom = self._zoom_level * factor
