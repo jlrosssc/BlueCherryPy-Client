@@ -7,13 +7,17 @@ cd "$DIR"
 PYTHON=""
 for candidate in \
     python3 \
-    /usr/local/bin/python3 \
-    /usr/bin/python3 \
+    "/opt/homebrew/Caskroom/miniconda/base/bin/python3" \
+    "/opt/homebrew/Caskroom/miniforge/base/bin/python3" \
+    "/opt/homebrew/Caskroom/anaconda/base/bin/python3" \
+    "/opt/homebrew/bin/python3" \
     "$HOME/Library/Python/3.13/bin/python3" \
+    "$HOME/Library/Python/3.12/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" \
-    "/opt/homebrew/bin/python3"; do
-    if command -v "$candidate" &>/dev/null 2>&1; then
+    /usr/local/bin/python3 \
+    /usr/bin/python3; do
+    if "$candidate" -c "import PyQt6" &>/dev/null 2>&1; then
         PYTHON="$candidate"
         break
     fi
