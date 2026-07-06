@@ -36,32 +36,104 @@ cd BlueCherryPy-Client
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate      # macOS / Linux
-# .venv\Scripts\activate       # Windows
+# .venv\Scripts\activate       # Windows (Command Prompt)
+# .venv\Scripts\Activate.ps1   # Windows (PowerShell)
 ```
 
-### 3 — Install dependencies
+### 3 — Install platform dependencies
+
+#### macOS
+No extra steps. All dependencies are bundled with the pip packages.
+
+#### Linux (Ubuntu / Debian)
+
+Install required system libraries before running `pip install`:
+
+```bash
+sudo apt install -y \
+    python3-dev \
+    libglib2.0-0 \
+    libegl1 \
+    libxcb-cursor0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-xinerama0 \
+    libxcb-xkb1 \
+    libxkbcommon-x11-0 \
+    ffmpeg
+```
+
+For the system keychain (password storage) on Linux, install a secrets backend:
+
+```bash
+sudo apt install -y gnome-keyring
+# or, for headless/minimal systems:
+pip install keyrings.alt
+```
+
+#### Linux (Fedora / RHEL)
+
+```bash
+sudo dnf install -y \
+    python3-devel \
+    mesa-libEGL \
+    xcb-util-cursor \
+    xcb-util-image \
+    xcb-util-keysyms \
+    xcb-util-renderutil \
+    xcb-util-wm \
+    libxkbcommon-x11 \
+    ffmpeg
+```
+
+#### Windows
+
+No extra system packages needed. Python 3.11+ from [python.org](https://python.org) includes everything required.
+
+> If pip complains about missing Visual C++ during install, download the
+> [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
+### 4 — Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> **macOS note:** PyQt6 multimedia (used for recording playback) requires the
-> `PyQt6-Qt6` and `PyQt6-sip` wheels, which are bundled with the `PyQt6` package.
-> No extra steps needed.
-
-### 4 — Run
+### 5 — Run
 
 ```bash
+# macOS / Linux
 python3 main.py
+
+# Windows
+python main.py
 ```
 
-### macOS double-click launcher
+### macOS — double-click launcher
 
-Make `BluecherryPy.command` executable, then double-click it in Finder:
+Make `BluecherryPy.command` executable once, then double-click it in Finder any time:
 
 ```bash
 chmod +x BluecherryPy.command
 ```
+
+### Windows — desktop shortcut
+
+Create a `.bat` file next to `main.py` with this content:
+
+```bat
+@echo off
+cd /d "%~dp0"
+.venv\Scripts\python.exe main.py
+```
+
+Double-click the `.bat` file to launch without a terminal window staying open.
+
+---
 
 ## First-time setup
 
@@ -80,6 +152,23 @@ chmod +x BluecherryPy.command
 | Play recording | Select it, press ▶ Play |
 | Download recording | Select it, press 💾 Download — or right-click |
 | Open in system player | ⤴ button in the player controls |
+
+## Troubleshooting
+
+**Linux: app won't start / "xcb" error**
+Run `pip install pyqt6 --force-reinstall` and make sure the `libxcb-*` packages above are installed.
+
+**Linux: passwords not saved between sessions**
+Install `gnome-keyring` or run `pip install keyrings.alt` for a file-based fallback.
+
+**Linux: no audio or video playback in recordings**
+Install `ffmpeg` via your package manager. PyQt6 multimedia uses FFmpeg as its backend on Linux.
+
+**Windows: `python3` not found**
+Use `python` instead of `python3` — Windows installs it as `python`.
+
+**Windows: SSL errors connecting to server**
+The app suppresses self-signed certificate warnings by default. If you still get SSL errors, add your server's certificate to the Windows certificate store.
 
 ## Dependencies
 
