@@ -33,7 +33,9 @@ class _StreamThread(QThread):
         if self._stream:
             self._stream.stop()
         self.quit()
-        self.wait(2000)
+        if not self.wait(5000):
+            self.terminate()
+            self.wait()
 
 
 # ── Zoomable frame view ───────────────────────────────────────────────────────
@@ -182,9 +184,15 @@ class LiveCameraWidget(QWidget):
         self._thread.start()
 
     def stop_stream(self):
-        if self._thread:
-            self._thread.stop_stream()
-            self._thread = None
+        t = self._thread
+        self._thread = None
+        if t is not None:
+            try:
+                t.frame_ready.disconnect()
+                t.error_occurred.disconnect()
+            except RuntimeError:
+                pass
+            t.stop_stream()
 
     def _on_frame(self, data: bytes):
         img = QImage.fromData(data)

@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QProgressBar, QSizePolicy, QFrame,
     QFileDialog, QMenu
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate, QSize, QPoint
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QDate, QSize, QPoint
 from PyQt6.QtGui import QPixmap, QImage, QAction
 
 from bluecherrypy.models.server import Server
@@ -29,8 +29,8 @@ _ITEM_H  = 120
 # ── Background workers ────────────────────────────────────────────────────────
 
 class _FetchRecordingsThread(QThread):
-    finished = pyqtSignal(int, list)
-    error    = pyqtSignal(int, str)
+    recordings_ready = pyqtSignal(int, list)
+    fetch_error      = pyqtSignal(int, str)
 
     def __init__(self, client: BluecherryClient, device_id: int):
         super().__init__()
@@ -39,10 +39,10 @@ class _FetchRecordingsThread(QThread):
 
     def run(self):
         try:
-            self.finished.emit(self._device_id,
-                               self._client.fetch_recordings(self._device_id))
+            self.recordings_ready.emit(self._device_id,
+                                       self._client.fetch_recordings(self._device_id))
         except Exception as e:
-            self.error.emit(self._device_id, str(e))
+            self.fetch_error.emit(self._device_id, str(e))
 
 
 class _ThumbnailThread(QThread):
@@ -86,8 +86,8 @@ class _ThumbnailThread(QThread):
 
 class _DownloadThread(QThread):
     """Download to a temp file for playback."""
-    finished = pyqtSignal(str)
-    error    = pyqtSignal(str)
+    download_ready = pyqtSignal(str)
+    dl_error       = pyqtSignal(str)
 
     def __init__(self, client: BluecherryClient, recording: RecordingEvent):
         super().__init__()
@@ -96,16 +96,16 @@ class _DownloadThread(QThread):
 
     def run(self):
         try:
-            self.finished.emit(self._client.download_recording(self._recording))
+            self.download_ready.emit(self._client.download_recording(self._recording))
         except Exception as e:
-            self.error.emit(str(e))
+            self.dl_error.emit(str(e))
 
 
 class _SaveThread(QThread):
     """Download a recording and save directly to a user-chosen path."""
-    progress = pyqtSignal(int)   # bytes written so far
-    finished = pyqtSignal(str)   # destination path
-    error    = pyqtSignal(str)
+    progress      = pyqtSignal(int)   # bytes written so far
+    save_complete = pyqtSignal(str)   # destination path
+    save_error    = pyqtSignal(str)
 
     def __init__(self, client: BluecherryClient, recording: RecordingEvent,
                  destination: str):
@@ -118,9 +118,9 @@ class _SaveThread(QThread):
         try:
             tmp = self._client.download_recording(self._recording)
             shutil.copy2(tmp, self._destination)
-            self.finished.emit(self._destination)
+            self.save_complete.emit(self._destination)
         except Exception as e:
-            self.error.emit(str(e))
+            self.save_error.emit(str(e))
 
 
 # ── Thumbnail list item ───────────────────────────────────────────────────────
@@ -418,24 +418,26 @@ class RecordingsBrowserWidget(QWidget):
 
     def _start_fetch(self, device_id: int):
         self._fetch_thread = _FetchRecordingsThread(self._client, device_id)
-        self._fetch_thread.finished.connect(self._on_fetch_finished)
-        self._fetch_thread.error.connect(self._on_fetch_error)
+        self._fetch_thread.recordings_ready.connect(self._on_fetch_finished)
+        self._fetch_thread.fetch_error.connect(self._on_fetch_error)
         self._fetch_thread.start()
 
     def _on_fetch_finished(self, device_id: int, recordings: list):
         self._all_recordings.extend(recordings)
+        # Defer to the next event-loop tick so the just-finished QThread can
+        # complete its SIP/GIL cleanup before its Python reference is dropped.
         if self._pending_device_ids:
-            self._fetch_next_device()
+            QTimer.singleShot(0, self._fetch_next_device)
         else:
-            self._on_all_fetched()
+            QTimer.singleShot(0, self._on_all_fetched)
 
     def _on_fetch_error(self, device_id: int, msg: str):
         name = self._device_map.get(device_id, str(device_id))
         self._set_status(f"Error loading {name}: {msg}")
         if self._pending_device_ids:
-            self._fetch_next_device()
+            QTimer.singleShot(0, self._fetch_next_device)
         else:
-            self._on_all_fetched()
+            QTimer.singleShot(0, self._on_all_fetched)
 
     def _on_all_fetched(self):
         self._progress.hide()
@@ -596,13 +598,14 @@ class RecordingsBrowserWidget(QWidget):
 
         if self._dl_thread and self._dl_thread.isRunning():
             self._dl_thread.terminate()
+            self._dl_thread.wait()
 
         self._player.show_placeholder("Downloading for playback…")
         self._dl_lbl.setText(f"Fetching  {r.title}…")
         self._dl_bar.show()
         self._dl_thread = _DownloadThread(self._client, r)
-        self._dl_thread.finished.connect(lambda path: self._on_play_download_done(path, r))
-        self._dl_thread.error.connect(self._on_download_error)
+        self._dl_thread.download_ready.connect(lambda path: self._on_play_download_done(path, r))
+        self._dl_thread.dl_error.connect(self._on_download_error)
         self._dl_thread.start()
 
     def _play_cached(self, path: str, r: RecordingEvent):
@@ -650,14 +653,15 @@ class RecordingsBrowserWidget(QWidget):
         # Otherwise download directly to destination
         if self._save_thread and self._save_thread.isRunning():
             self._save_thread.terminate()
+            self._save_thread.wait()
 
         self._dl_lbl.setText(f"Saving  {r.title}…")
         self._dl_bar.show()
         self._save_sel_btn.setEnabled(False)
 
         self._save_thread = _SaveThread(self._client, r, dest)
-        self._save_thread.finished.connect(self._on_save_done)
-        self._save_thread.error.connect(self._on_save_error)
+        self._save_thread.save_complete.connect(self._on_save_done)
+        self._save_thread.save_error.connect(self._on_save_error)
         self._save_thread.start()
 
     def _on_save_done(self, dest: str):
