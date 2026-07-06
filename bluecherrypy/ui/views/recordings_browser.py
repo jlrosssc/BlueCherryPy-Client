@@ -352,19 +352,13 @@ class RecordingsBrowserWidget(QWidget):
         ab_layout.setContentsMargins(10, 6, 10, 6)
         ab_layout.setSpacing(8)
 
-        self._play_sel_btn = QPushButton("▶  Play")
-        self._play_sel_btn.setToolTip("Download and play selected recording")
-        self._play_sel_btn.setEnabled(False)
-        self._play_sel_btn.clicked.connect(self._play_selected)
-        ab_layout.addWidget(self._play_sel_btn)
-
         self._save_sel_btn = QPushButton("💾  Download")
-        self._save_sel_btn.setToolTip("Save selected recording to disk")
+        self._save_sel_btn.setToolTip("Save selected recording(s) to disk")
         self._save_sel_btn.setEnabled(False)
         self._save_sel_btn.clicked.connect(self._save_selected)
         ab_layout.addWidget(self._save_sel_btn)
 
-        self._sel_info_lbl = QLabel("Select a recording")
+        self._sel_info_lbl = QLabel("Click a recording to play it")
         self._sel_info_lbl.setStyleSheet("color:#888; font-size:11px;")
         ab_layout.addWidget(self._sel_info_lbl, stretch=1)
         layout.addWidget(action_bar)
@@ -557,7 +551,7 @@ class RecordingsBrowserWidget(QWidget):
         self._sel_info_lbl.setText(f"{cam}  ·  {date_str}{dur_str}")
 
     def _on_selection_changed(self):
-        """Updates buttons and auto-plays when selection changes."""
+        """Updates buttons and plays on single-click selection."""
         selected = self._list.selectedItems()
         n = len(selected)
         downloadable = [
@@ -565,11 +559,8 @@ class RecordingsBrowserWidget(QWidget):
             if item.data(Qt.ItemDataRole.UserRole) is not None
             and item.data(Qt.ItemDataRole.UserRole).media_id is not None
         ]
-        n_dl   = len(downloadable)
-        single = (n == 1 and self._current_recording is not None
-                  and self._current_recording.media_id is not None)
+        n_dl = len(downloadable)
 
-        self._play_sel_btn.setEnabled(single)
         self._save_sel_btn.setEnabled(n_dl > 0)
         self._save_sel_btn.setText(
             f"💾  Download ({n_dl})" if n_dl > 1 else "💾  Download"
@@ -577,13 +568,13 @@ class RecordingsBrowserWidget(QWidget):
         if n > 1:
             self._sel_info_lbl.setText(f"{n} recordings selected")
         elif n == 0:
-            self._sel_info_lbl.setText("Select a recording")
+            self._sel_info_lbl.setText("Click a recording to play it")
 
         if n == 1 and self._current_recording is not None:
             if self._current_recording.media_id is None:
                 self._player.show_placeholder("No media file for this recording.")
-            elif self._player.has_loaded_media:
-                # Auto-switch when player already has something loaded
+            else:
+                # Single click always starts playback
                 self._play_recording(self._current_recording)
 
     # ── Context menu ──────────────────────────────────────────────────────────
@@ -605,27 +596,19 @@ class RecordingsBrowserWidget(QWidget):
         ]
 
         menu = QMenu(self)
-        play_act     = menu.addAction("▶  Play")
         dl_label     = (f"💾  Download {len(dl_targets)} recordings…"
                         if multi else "💾  Download to disk…")
         download_act = menu.addAction(dl_label)
-        play_act.setEnabled(r.media_id is not None and not multi)
         download_act.setEnabled(len(dl_targets) > 0)
 
         chosen = menu.exec(self._list.mapToGlobal(pos))
-        if chosen == play_act:
-            self._play_recording(r)
-        elif chosen == download_act:
+        if chosen == download_act:
             if len(dl_targets) > 1:
                 self._start_batch_save(dl_targets)
             elif dl_targets:
                 self._save_recording(dl_targets[0])
 
     # ── Playback ──────────────────────────────────────────────────────────────
-
-    def _play_selected(self):
-        if self._current_recording:
-            self._play_recording(self._current_recording)
 
     def _play_recording(self, r: RecordingEvent):
         if r.media_id is not None and r.media_id in self._cached_paths:
