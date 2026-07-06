@@ -24,6 +24,31 @@ A cross-platform desktop client for [Bluecherry DVR](https://www.bluecherrydvr.c
 
 ## Install
 
+### One-line install scripts
+
+Copy and paste the command for your platform into a terminal:
+
+**macOS**
+```bash
+git clone https://github.com/jlrosssc/BlueCherryPy-Client.git && cd BlueCherryPy-Client && bash install_macos.sh
+```
+
+**Linux (Ubuntu / Debian / Fedora)**
+```bash
+git clone https://github.com/jlrosssc/BlueCherryPy-Client.git && cd BlueCherryPy-Client && bash install_linux.sh
+```
+
+**Windows** — open Command Prompt and run:
+```bat
+git clone https://github.com/jlrosssc/BlueCherryPy-Client.git && cd BlueCherryPy-Client && install_windows.bat
+```
+
+Each script installs system dependencies, creates a virtual environment, installs Python packages, and offers to launch the app.
+
+---
+
+### Manual install
+
 ### 1 — Clone the repo
 
 ```bash
