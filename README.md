@@ -92,4 +92,4 @@ chmod +x BluecherryPy.command
 
 ## License
 
-GPL-2.0 — same license as the Linux kernel.
+GPL-2.0
