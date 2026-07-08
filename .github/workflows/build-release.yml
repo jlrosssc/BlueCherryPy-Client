@@ -7,15 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag to create (e.g. v1.0.0)'
+        description: 'Version tag to create (e.g. v1.1.0)'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.1.0'
 
 permissions:
   contents: write
 
 jobs:
-  # ── Windows .exe ─────────────────────────────────────────────────────────────
+  # ── Windows installer ─────────────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
     steps:
@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
-      - name: Build Windows executable
+      - name: Build executable
         run: >
           pyinstaller
           --onefile
@@ -38,12 +38,51 @@ jobs:
           --hidden-import bluecherrypy
           main.py
 
+      - name: Create Inno Setup installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}" -replace '^v', ''
+          New-Item -ItemType Directory -Force -Path installer | Out-Null
+          @"
+          [Setup]
+          AppName=BluecherryPy
+          AppVersion=$version
+          AppPublisher=BluecherryPy
+          DefaultDirName={userappdata}\BluecherryPy
+          DefaultGroupName=BluecherryPy
+          OutputBaseFilename=BluecherryPy-Setup
+          OutputDir=installer
+          Compression=lzma
+          SolidCompression=yes
+          PrivilegesRequired=lowest
+          DisableProgramGroupPage=yes
+          DisableWelcomePage=no
+          WizardStyle=modern
+
+          [Files]
+          Source: "dist\BluecherryPy.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{group}\BluecherryPy"; Filename: "{app}\BluecherryPy.exe"
+          Name: "{commondesktop}\BluecherryPy"; Filename: "{app}\BluecherryPy.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Run]
+          Filename: "{app}\BluecherryPy.exe"; Description: "&Launch BluecherryPy now"; Flags: nowait postinstall skipifsilent
+
+          [UninstallDelete]
+          Type: filesandordirs; Name: "{app}"
+          "@ | Out-File -FilePath setup.iss -Encoding UTF8
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+
       - uses: actions/upload-artifact@v4
         with:
           name: BluecherryPy-windows
-          path: dist/BluecherryPy.exe
+          path: installer/BluecherryPy-Setup.exe
 
-  # ── Linux binary ─────────────────────────────────────────────────────────────
+  # ── Linux AppImage ────────────────────────────────────────────────────────────
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -64,9 +103,9 @@ jobs:
             libxkbcommon-x11-0 libdbus-1-3
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements.txt pyinstaller pillow
 
-      - name: Build Linux binary
+      - name: Build binary
         run: >
           pyinstaller
           --onefile
@@ -75,10 +114,51 @@ jobs:
           --hidden-import bluecherrypy
           main.py
 
+      - name: Package as AppImage
+        run: |
+          # AppDir structure
+          mkdir -p AppDir/usr/bin
+
+          cp dist/BluecherryPy AppDir/usr/bin/
+
+          # AppRun entry point
+          cat > AppDir/AppRun << 'APPRUN'
+          #!/bin/bash
+          exec "$APPDIR/usr/bin/BluecherryPy" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+
+          # Desktop entry (required by AppImage spec)
+          cat > AppDir/BluecherryPy.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=BluecherryPy
+          Exec=BluecherryPy
+          Type=Application
+          Categories=AudioVideo;Video;Network;
+          Comment=Bluecherry DVR Client
+          DESKTOP
+
+          # Simple blue circle icon (required by AppImage spec)
+          python3 - << 'PYICON'
+          from PIL import Image, ImageDraw
+          img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+          draw = ImageDraw.Draw(img)
+          draw.ellipse([4, 4, 252, 252], fill=(21, 101, 192, 255))
+          draw.ellipse([60, 80, 196, 176], fill="white")
+          draw.rectangle([32, 152, 224, 220], fill="white")
+          img.save("AppDir/BluecherryPy.png")
+          PYICON
+
+          # Download and run appimagetool (no FUSE needed via APPIMAGE_EXTRACT_AND_RUN)
+          wget -q -O appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool AppDir BluecherryPy-x86_64.AppImage
+
       - uses: actions/upload-artifact@v4
         with:
           name: BluecherryPy-linux
-          path: dist/BluecherryPy
+          path: BluecherryPy-x86_64.AppImage
 
   # ── GitHub Release ────────────────────────────────────────────────────────────
   release:
@@ -99,42 +179,36 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare files
-        run: |
-          chmod +x artifacts/BluecherryPy-linux/BluecherryPy
-          mv artifacts/BluecherryPy-linux/BluecherryPy \
-             artifacts/BluecherryPy-linux/BluecherryPy-linux
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
           name: BluecherryPy ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
           body: |
-            ## BluecherryPy Client — Bluecherry DVR Desktop Client
+            ## BluecherryPy — Bluecherry DVR Desktop Client
 
-            ### Download
-            | Platform | File | Instructions |
-            |----------|------|--------------|
-            | **Windows 10/11** | `BluecherryPy.exe` | Double-click to run. No Python needed. |
-            | **Linux** (Ubuntu/Debian) | `BluecherryPy-linux` | `chmod +x BluecherryPy-linux && ./BluecherryPy-linux` |
+            ### Download & Install
 
-            > **Windows Defender warning**: The app is safe but unsigned. Click **More info → Run anyway** if prompted.
+            | Platform | File | Steps |
+            |----------|------|-------|
+            | **Windows 10/11** | `BluecherryPy-Setup.exe` | Download → Double-click → Next → Finish. App appears in Start Menu and on Desktop. |
+            | **Linux** (Ubuntu/Debian) | `BluecherryPy-x86_64.AppImage` | Download → Right-click → Properties → Allow executing as program → Double-click to run. |
+
+            > **Windows note**: Windows Defender may show a warning because the app is not code-signed.
+            > Click **More info → Run anyway** — the app is safe.
 
             ### Features
             - Live MJPEG camera view with zoom & pan
-            - Recordings browser with thumbnail previews
-            - Playback and download of recordings
-            - Multi-camera support, PTZ controls, dark UI
+            - Recordings browser with playback and download
+            - Multi-camera support, PTZ controls
 
-            ### Or install from source
+            ### Or run from source (macOS / Linux)
             ```bash
             git clone https://github.com/jlrosssc/BlueCherryPy-Client.git
             cd BlueCherryPy-Client
-            bash install_macos.sh    # macOS
-            bash install_linux.sh    # Linux
-            install_windows.bat      # Windows
+            bash install_macos.sh   # macOS
+            bash install_linux.sh   # Linux
             ```
           files: |
-            artifacts/BluecherryPy-windows/BluecherryPy.exe
-            artifacts/BluecherryPy-linux/BluecherryPy-linux
+            artifacts/BluecherryPy-windows/BluecherryPy-Setup.exe
+            artifacts/BluecherryPy-linux/BluecherryPy-x86_64.AppImage
