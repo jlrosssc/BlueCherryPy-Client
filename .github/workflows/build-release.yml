@@ -133,8 +133,9 @@ jobs:
           [Desktop Entry]
           Name=BluecherryPy
           Exec=BluecherryPy
+          Icon=BluecherryPy
           Type=Application
-          Categories=AudioVideo;Video;Network;
+          Categories=Video;Network;
           Comment=Bluecherry DVR Client
           DESKTOP
 
