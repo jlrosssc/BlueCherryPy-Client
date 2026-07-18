@@ -208,4 +208,9 @@ The app suppresses self-signed certificate warnings by default. If you still get
 
 ## License
 
-GPL-2.0
+GPL-3.0-or-later. See `LICENSE`.
+
+## Third-Party Licenses
+
+This app depends on PyQt6 and other third-party packages, each under its
+own license. See `THIRD_PARTY_LICENSES.md`.
